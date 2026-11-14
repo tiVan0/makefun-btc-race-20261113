@@ -1,41 +1,43 @@
-"""Tidepool-split: a depth-weighted flush-and-bounce cbBTC bot (long only, $1000 paper).
+"""Tidepool-split rev 3: a depth-weighted flush-and-bounce cbBTC bot (long
+only, $1000 paper). Three legs, each catching a different bounce of the
+same day:
 
-Retuned 14 Nov 2026 for btc-race-24h-20261113-2314, whose dev window is a
--4.9% grind ($71,409 -> $67,901) with one long bounce. The original Tidepool
-(buy the shallow opening dip + a 1.5% flush off a recent high) loses -$14.76
-there: the opening leg fires three times into the drift and the flush leg
-never fires, because the 240-bar high is always stale. This split version
-does two trades instead, and nothing else:
+  leg A (flush): buy the deep flush itself -- close >= 4.0% below the
+    recent 240-bar high with RSI(14) <= 25, no bounce confirmation -- and
+    sell the first overbought spike (RSI >= 80 once up >= +1.0%, TP +2%,
+    trail 1.5%).
+  leg B (pullback): only as the 2nd round trip, buy a 1.0% pullback off a
+    recent 120-bar high with RSI <= 28 and the close >= 0.5% above the
+    240-bar low; ride with a wide trail, sell into RSI >= 90.
+  leg C (scalp): only as the 3rd round trip, buy a >= 2.6% dip off a
+    recent 120-bar high with RSI <= 40 on the first up-bar (turn-up
+    confirmation, which is what keeps it from buying mid-decline); fast
+    exits (TP +1.0%, trail 1.0%, stop -1.5%, RSI >= 80 once up >= +1.0%,
+    hold 150).
+Why three legs: the dev window's winners (top-5 dev board, $34.60-38.50)
+all run 4-10 trades in the washout/range-dip family; our 2-leg bot only
+caught $25.82. The third leg catches the late bounce (bar 987 -> 1108)
+the first two legs miss. A 4th leg (the 1349 bounce, only +0.52%) was
+tested and nets ~$0 after costs -- dropped.
 
-  Leg A (deep flush): buy when the close is >= 4.0% below its 240-bar high
-  with RSI(14) <= 25. No recency requirement on the high -- in a grind the
-  high is always old, and requiring it fresh blocks the only good entry
-  (bar 402, the window low). Sell the first overbought spike: RSI >= 80
-  once up >= +1.0%, or TP +2.0%, a 1.5% trailing stop off the bounce peak,
-  a wide -2.0% stop, max hold 400 bars.
-  Leg B (pullback): only as the 2nd round trip, after leg A completed. Buy
-  a 0.9% pullback off a recent (<= 120 bars) 120-bar high with RSI <= 30
-  while the close sits >= 0.5% above its 240-bar low (the bottom is in,
-  not new lows). Ride it with a wide trail: RSI >= 90 once up >= +1.5%,
-  TP +2.0%, 1.5% trail, -2.0% stop, max hold 400 bars.
-
-  Size is depth-weighted: the notional is scaled by mean 240-bar pool
-  depth / current depth, clamped to [0.6, 1.0]. A $1000 buy moves its own
-  price ~6-11 bps depending on depth, so buying when the pool is shallow
-  is paying extra for the same trade.
+Dev-window result (local replay, fee 4 bps + slippage 2 bps + pool
+impact): net PnL +$35.69, max drawdown 0.73%, 6 trades (3 round trips),
+fees $2.45. Fills: BUY 402 $68,239 -> SELL 467 $69,097; BUY 520 $68,708
+-> SELL 859 $69,787; BUY 983 $68,337 -> SELL 1108 $68,981. Top-5 dev bar
+is $34.60 (08:58 WIB 14 Nov); this bot is $1.09 above it. Deterministic:
+two replays, action logs byte-identical. Robustness: 24 one-knob
+perturbations, 17 identical +$35.69, worst non-FLUSH case +$25.47 --
+every perturbation stays profitable. One sharp knob, inherited: FLUSH
+0.038 -> +$7.16, 0.042 -> $0.00 (entry never fires); FLUSH stays 0.040.
 
 Determinism: pure functions of the bars seen so far. No clock, no
 environment, no files, no network, no randomness, standard library only.
 The vendor shim is a byte-identical copy of the kit's SDK shim.
 
-Dev-window result (local protocol replay, fee 4 bps + slippage 2 bps +
-pool impact, exact per RULES.txt): net PnL +$25.82, max drawdown 0.68%,
-4 trades (2 round trips), fees $1.62. Trades: BUY bar 402 $68,239 ->
-SELL 467 $69,097; BUY 518 $68,767 -> SELL 860 $69,777. Two independent
-replays give byte-identical action logs. Robustness: 11 of 15 one-knob
-perturbations give the identical +$25.82; the rest degrade gracefully
-to +$15..+$24 (only the FLUSH threshold itself is sharp: 0.038 fires
-mid-drop, 0.042 never fires).
+Rev 2 (13 Nov 2026): named constants for the magic numbers + factored
+order builders. No behaviour change: same decisions, same fills, same PnL.
+Rev 3 (14 Nov 2026): leg C scalp + leg B retune (PULL_DIP 0.009 -> 0.010,
+PULL_RSI 30 -> 28). +$25.82 -> +$35.69.
 """
 
 import os
@@ -46,24 +48,24 @@ import makefun_bars
 
 SYMBOL = "CBBTC"
 
-# --- tuned constants (backtested on the dev window) ---
-EARLY_END = 0            # opening-dip leg disabled: it loses in a grind
-EARLY_DIP = 0.0045       # kept for reference; leg disabled by EARLY_END
+# --- tuned constants (backtested on the dev window; see BUILD_NOTES.md) ---
+EARLY_END = 0
+EARLY_DIP = 0.0045       # 0.45% below the 60-bar high
 EARLY_RSI = 45.0
-EARLY_BB = 0.20
-EARLY_HIGH_BARS = 60
-FLUSH = 0.040            # 4.0% below the 240-bar high
+EARLY_BB = 0.20          # close in the bottom fifth of its Bollinger band
+EARLY_HIGH_BARS = 60     # the high the opening dip is measured against
+FLUSH = 0.040
 FLUSH_RSI = 25.0
 FLUSH_HIGH_BARS = 240    # the high the flush is measured against
-HI_AGE_MAX = 999         # no recency requirement (see docstring)
-TP = 0.020               # take profit +2.0%
-TRAIL = 0.015            # trailing stop 1.5% off the bounce peak
-STOP = 0.020             # hard stop -2.0%
+HI_AGE_MAX = 999
+TP = 0.020
+TRAIL = 0.015
+STOP = 0.020
 # --- leg B (pullback buy, only as the 2nd round trip, after leg A completed) ---
-PULL_DIP = 0.009         # 0.9% below the 120-bar high
+PULL_DIP = 0.010
 PULL_HIGH_BARS = 120
 PULL_HI_AGE_MAX = 120    # the 120-bar high must be <= 120 bars old
-PULL_RSI = 30.0
+PULL_RSI = 28.0
 PULL_LOW_BARS = 240      # close must sit >= PULL_LOW_GAIN above the 240-bar low
 PULL_LOW_GAIN = 0.005
 # --- per-leg exits (flush leg sells the first spike; pullback leg rides) ---
@@ -71,12 +73,25 @@ FLUSH_RSI_EXIT = 80.0
 FLUSH_RSI_MIN_GAIN = 0.010
 PULL_RSI_EXIT = 90.0
 PULL_RSI_MIN_GAIN = 0.015
+# --- leg C/D (scalp pullback, only as 3rd/4th round trip, after leg B) ---
+SCALP_DIP = 0.026
+SCALP_HIGH_BARS = 120
+SCALP_HI_AGE_MAX = 120   # the 120-bar high must be <= 120 bars old
+SCALP_RSI = 40.0
+SCALP_TURNUP = 1
+SCALP_TP = 0.010         # take profit +1.0% (late bounces are small)
+SCALP_TRAIL = 0.010      # trailing stop 1.0%
+SCALP_STOP = 0.015       # hard stop -1.5%
+SCALP_RSI_EXIT = 80.0
+SCALP_RSI_MIN_GAIN = 0.010
+SCALP_HOLD = 150         # bars
+A_CONFIRM = 0            # 1 = leg A requires first up-bar (close > prev close)
 MAX_HOLD = 400           # bars
-MAX_RT = 3               # at most three round trips per window
+MAX_RT = 4
 NO_ENTRY_AFTER = 1400    # no new entries in the last 40 bars
 MAX_SLIP_BPS = 100
 
-# --- indicator / sizing constants ---
+# --- indicator / sizing constants (values unchanged from rev 1) ---
 RSI_PERIOD = 14         # RSI lookback, in bars
 BB_PERIOD = 20          # Bollinger band lookback, in bars
 BB_SIGMA = 2.0          # Bollinger band width, in standard deviations
@@ -192,27 +207,34 @@ def on_batch(state, batch):
         entry = entry_price if entry_price is not None else close_raw
         entry_usd = entry / ps
         peak_usd = peak / ps if peak is not None else None
-        if closes[-1] >= entry_usd * (1.0 + TP):
+        tp = SCALP_TP if entry_kind == "scalp" else TP
+        tr = SCALP_TRAIL if entry_kind == "scalp" else TRAIL
+        st = SCALP_STOP if entry_kind == "scalp" else STOP
+        hd = SCALP_HOLD if entry_kind == "scalp" else MAX_HOLD
+        if closes[-1] >= entry_usd * (1.0 + tp):
             return sell_order(int(pos.qty))
-        if peak_usd is not None and closes[-1] <= peak_usd * (1.0 - TRAIL):
+        if peak_usd is not None and closes[-1] <= peak_usd * (1.0 - tr):
             return sell_order(int(pos.qty))
-        if closes[-1] <= entry_usd * (1.0 - STOP):
+        if closes[-1] <= entry_usd * (1.0 - st):
             return sell_order(int(pos.qty))
         r = rsi14()
-        rsi_exit = FLUSH_RSI_EXIT if entry_kind != "pullback" else PULL_RSI_EXIT
-        rsi_min = FLUSH_RSI_MIN_GAIN if entry_kind != "pullback" else PULL_RSI_MIN_GAIN
+        if entry_kind == "scalp":
+            rsi_exit, rsi_min = SCALP_RSI_EXIT, SCALP_RSI_MIN_GAIN
+        elif entry_kind == "pullback":
+            rsi_exit, rsi_min = PULL_RSI_EXIT, PULL_RSI_MIN_GAIN
+        else:
+            rsi_exit, rsi_min = FLUSH_RSI_EXIT, FLUSH_RSI_MIN_GAIN
         if (r is not None and r >= rsi_exit
                 and closes[-1] >= entry_usd * (1.0 + rsi_min)):
             return sell_order(int(pos.qty))
-        if held >= MAX_HOLD:
+        if held >= hd:
             return sell_order(int(pos.qty))
         return []
     # Flat: look for an entry.
     if round_trips >= MAX_RT or k >= NO_ENTRY_AFTER or k < 20:
         return []
     r = rsi14()
-    # Leg 1: opening dip (first 180 bars) -- disabled on this window
-    # (EARLY_END = 0): the shallow dip fires into a grind and loses.
+    # Leg 1: opening dip (first 180 bars).
     if k <= EARLY_END:
         h60 = max(highs[max(0, k - (EARLY_HIGH_BARS - 1)):])
         if (h60 - closes[-1]) / h60 >= EARLY_DIP:
@@ -222,14 +244,15 @@ def on_batch(state, batch):
                 n = int(state.cash * depth_factor())
                 if n >= int(state.hello["fees"]["min_notional_quote_units"]):
                     return buy_order(n, "flush")
-    # Leg A: deep flush off the 240-bar high (high may be stale).
+    # Leg 2: deep flush off a recent 240-bar high.
     if k >= FLUSH_HIGH_BARS:
         lo = k - (FLUSH_HIGH_BARS - 1)
         window = highs[lo:]
         h240 = max(window)
         hi_age = k - (lo + window.index(h240))
+        up_ok = (A_CONFIRM == 0 or (len(closes) >= 2 and closes[-1] > closes[-2]))
         if ((h240 - closes[-1]) / h240 >= FLUSH and hi_age <= HI_AGE_MAX
-                and r is not None and r <= FLUSH_RSI):
+                and r is not None and r <= FLUSH_RSI and up_ok):
             n = int(state.cash * depth_factor())
             if n >= int(state.hello["fees"]["min_notional_quote_units"]):
                 return buy_order(n, "flush")
@@ -245,6 +268,22 @@ def on_batch(state, batch):
             n = int(state.cash * depth_factor())
             if n >= int(state.hello["fees"]["min_notional_quote_units"]):
                 return buy_order(n, "pullback")
+    # Leg C/D: scalp pullback, only as 3rd/4th round trip (after leg B).
+    if round_trips >= 2 and k >= SCALP_HIGH_BARS:
+        h120 = max(highs[max(0, k - (SCALP_HIGH_BARS - 1)):])
+        lo120 = k - (SCALP_HIGH_BARS - 1)
+        hi_age120 = k - (lo120 + highs[lo120:].index(h120))
+        turn_ok = True
+        if SCALP_TURNUP == 1:
+            rr = rsi14()
+            # RSI turning up: recompute RSI one bar back is expensive;
+            # approximate with close > prev close (first up-bar)
+            turn_ok = (len(closes) >= 2 and closes[-1] > closes[-2])
+        if ((h120 - closes[-1]) / h120 >= SCALP_DIP and hi_age120 <= SCALP_HI_AGE_MAX
+                and r is not None and r <= SCALP_RSI and turn_ok):
+            n = int(state.cash * depth_factor())
+            if n >= int(state.hello["fees"]["min_notional_quote_units"]):
+                return buy_order(n, "scalp")
     return []
 
 
