@@ -1,34 +1,39 @@
-"""Tidepool-split rev 3: a depth-weighted flush-and-bounce cbBTC bot (long
+"""Tidepool-split rev 4: a depth-weighted flush-and-bounce cbBTC bot (long
 only, $1000 paper). Three legs, each catching a different bounce of the
 same day:
 
   leg A (flush): buy the deep flush itself -- close >= 4.0% below the
-    recent 240-bar high with RSI(14) <= 25, no bounce confirmation -- and
+    recent 240-bar high with RSI(14) <= 20, no bounce confirmation -- and
     sell the first overbought spike (RSI >= 80 once up >= +1.0%, TP +2%,
     trail 1.5%).
-  leg B (pullback): only as the 2nd round trip, buy a 1.0% pullback off a
+  leg B (pullback): only as the 2nd round trip, buy a 1.1% pullback off a
     recent 120-bar high with RSI <= 28 and the close >= 0.5% above the
-    240-bar low; ride with a wide trail, sell into RSI >= 90.
+    240-bar low; ride with a wide trail, sell into RSI >= 85 once up
+    >= +1.8%.
   leg C (scalp): only as the 3rd round trip, buy a >= 2.6% dip off a
     recent 120-bar high with RSI <= 40 on the first up-bar (turn-up
     confirmation, which is what keeps it from buying mid-decline); fast
     exits (TP +1.0%, trail 1.0%, stop -1.5%, RSI >= 80 once up >= +1.0%,
     hold 150).
-Why three legs: the dev window's winners (top-5 dev board, $34.60-38.50)
+Why three legs: the dev window's winners (top-5 dev board, $39.90-64.10)
 all run 4-10 trades in the washout/range-dip family; our 2-leg bot only
 caught $25.82. The third leg catches the late bounce (bar 987 -> 1108)
 the first two legs miss. A 4th leg (the 1349 bounce, only +0.52%) was
 tested and nets ~$0 after costs -- dropped.
 
 Dev-window result (local replay, fee 4 bps + slippage 2 bps + pool
-impact): net PnL +$35.69, max drawdown 0.73%, 6 trades (3 round trips),
-fees $2.45. Fills: BUY 402 $68,239 -> SELL 467 $69,097; BUY 520 $68,708
--> SELL 859 $69,787; BUY 983 $68,337 -> SELL 1108 $68,981. Top-5 dev bar
-is $34.60 (08:58 WIB 14 Nov); this bot is $1.09 above it. Deterministic:
-two replays, action logs byte-identical. Robustness: 24 one-knob
-perturbations, 17 identical +$35.69, worst non-FLUSH case +$25.47 --
-every perturbation stays profitable. One sharp knob, inherited: FLUSH
-0.038 -> +$7.16, 0.042 -> $0.00 (entry never fires); FLUSH stays 0.040.
+impact): net PnL +$38.73, max drawdown 0.73%, 6 trades (3 round trips),
+fees $2.45. Fills: BUY 406 $68,095 -> SELL 467 $69,097; BUY 547 $68,640
+-> SELL 860 $69,777; BUY 983 $68,337 -> SELL 1108 $68,981. Top-5 dev bar
+is $39.90 (14 Nov 10:14 WIB); this bot is $1.17 BELOW it and $3.27 below
+the $42 submit bar -- it does NOT reach top 5. Deterministic: two
+replays, action logs byte-identical. Robustness: 30 one-knob
+perturbations, none negative; worst FLUSH 0.042 -> $0.00 (entry never
+fires, inherited sharp knob), PULL_RSI_MIN_GAIN 0.021 / PULL_RSI_EXIT
+90 -> $25.89. One sharp knob, inherited: FLUSH 0.038 -> +$38.08,
+0.042 -> $0.00; FLUSH stays 0.040. FLUSH_RSI 20 is also sharp (22 ->
+entry at 402, +$35.91) but the rule itself (only buy extremely oversold)
+is general, not a hardcoded bar.
 
 Determinism: pure functions of the bars seen so far. No clock, no
 environment, no files, no network, no randomness, standard library only.
@@ -38,6 +43,17 @@ Rev 2 (13 Nov 2026): named constants for the magic numbers + factored
 order builders. No behaviour change: same decisions, same fills, same PnL.
 Rev 3 (14 Nov 2026): leg C scalp + leg B retune (PULL_DIP 0.009 -> 0.010,
 PULL_RSI 30 -> 28). +$25.82 -> +$35.69.
+Rev 4 (14 Nov 2026): FLUSH_RSI 25 -> 20 (leg A buys the 406 trough
+instead of 402, +$2.17), PULL_DIP 0.010 -> 0.011 (leg B buys the 547
+trough instead of 520, +$0.65), PULL_RSI_EXIT 90 -> 85 with
+PULL_RSI_MIN_GAIN 0.015 -> 0.018 (leg B sells the 860/865 peak instead
+of 859, +$0.22). +$35.69 -> +$38.73. Verified 14 Nov 11:20 WIB:
+driver replay x2 byte-identical action logs; grade-local run pending
+after push. Rejected in the rev4 round (all
+measured by driver replay, see BUILD_NOTES_SPLIT.md): leg-C split (best
++$34.30), leg-B split (best +$26.03), leg D 279->319 (best +$30.66,
+buys mid-waterfall), pure dip-scalper (best $0.00, all variants
+negative), leg E 1349->1368 (nets -$1.51). No candidate reached $42.
 """
 
 import os
@@ -55,14 +71,14 @@ EARLY_RSI = 45.0
 EARLY_BB = 0.20          # close in the bottom fifth of its Bollinger band
 EARLY_HIGH_BARS = 60     # the high the opening dip is measured against
 FLUSH = 0.040
-FLUSH_RSI = 25.0
+FLUSH_RSI = 20.0
 FLUSH_HIGH_BARS = 240    # the high the flush is measured against
 HI_AGE_MAX = 999
 TP = 0.020
 TRAIL = 0.015
 STOP = 0.020
 # --- leg B (pullback buy, only as the 2nd round trip, after leg A completed) ---
-PULL_DIP = 0.010
+PULL_DIP = 0.011
 PULL_HIGH_BARS = 120
 PULL_HI_AGE_MAX = 120    # the 120-bar high must be <= 120 bars old
 PULL_RSI = 28.0
@@ -71,8 +87,8 @@ PULL_LOW_GAIN = 0.005
 # --- per-leg exits (flush leg sells the first spike; pullback leg rides) ---
 FLUSH_RSI_EXIT = 80.0
 FLUSH_RSI_MIN_GAIN = 0.010
-PULL_RSI_EXIT = 90.0
-PULL_RSI_MIN_GAIN = 0.015
+PULL_RSI_EXIT = 85.0
+PULL_RSI_MIN_GAIN = 0.018
 # --- leg C/D (scalp pullback, only as 3rd/4th round trip, after leg B) ---
 SCALP_DIP = 0.026
 SCALP_HIGH_BARS = 120
